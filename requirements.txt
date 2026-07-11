@@ -1,6 +1,14 @@
+# Modeling app (Streamlit)
 streamlit
 pandas
 numpy
 plotly
 scipy
 xlsxwriter
+
+# Agent-first data platform
+anthropic
+fastapi
+uvicorn[standard]
+playwright
+cryptography
