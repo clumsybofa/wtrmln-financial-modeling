@@ -2,8 +2,13 @@
 #
 #   fly launch --copy-config --no-deploy    # first time; pick a region
 #   fly volumes create wtrmln_data --size 1
-#   fly secrets set ANTHROPIC_API_KEY=sk-ant-... WTRMLN_BASIC_AUTH=team:strongpassword
+#   fly secrets set ANTHROPIC_API_KEY=sk-ant-... \
+#     WTRMLN_BASIC_AUTH=team:strongpassword \
+#     WTRMLN_VAULT_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 #   fly deploy
+#
+# The app FAILS CLOSED: it will not boot without WTRMLN_BASIC_AUTH and
+# WTRMLN_VAULT_KEY. Never set WTRMLN_DEV_MODE on a hosted deployment.
 #
 # Browsers run in-process, so give the machine enough memory for a few
 # concurrent onboarding sessions (each Chromium is ~300-500 MB).

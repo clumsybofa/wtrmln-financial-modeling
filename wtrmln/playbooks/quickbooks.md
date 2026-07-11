@@ -3,6 +3,7 @@ name: QuickBooks Online
 slug: quickbooks
 icon: 📗
 color: #2CA01C
+allowed_domains: intuit.com, quickbooks.intuit.com, developer.intuit.com
 login_url: https://accounts.intuit.com/app/sign-in
 description: Accounting — GL, P&L, balance sheet, AR/AP aging
 ---

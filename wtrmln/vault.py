@@ -21,6 +21,17 @@ def _fernet() -> Fernet:
     key = os.environ.get("WTRMLN_VAULT_KEY")
     if key:
         return Fernet(key.encode())
+    # Auto-generated keys live next to the ciphertext, so a copy of the data
+    # directory decrypts the vault. Acceptable only for local development —
+    # hosted deployments must supply WTRMLN_VAULT_KEY from a secrets manager
+    # (the server refuses to start otherwise; this check is the backstop).
+    if os.environ.get("WTRMLN_DEV_MODE") != "1":
+        raise RuntimeError(
+            "WTRMLN_VAULT_KEY is not set. Generate one with "
+            "python -c \"from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())\" and store it in your "
+            "secrets manager, or set WTRMLN_DEV_MODE=1 for local development."
+        )
     VAULT_DIR.mkdir(parents=True, exist_ok=True)
     if not KEY_PATH.exists():
         KEY_PATH.write_bytes(Fernet.generate_key())

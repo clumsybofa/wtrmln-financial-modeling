@@ -49,7 +49,8 @@ class VirtualBrowser:
         self.page = None
         self._lock = asyncio.Lock()
 
-    async def start(self, start_url: str = "about:blank"):
+    async def start(self, start_url: str = "about:blank",
+                    allowed_domains: list[str] | None = None):
         self._pw = await async_playwright().start()
         launch_kwargs = {"headless": True}
         exe = os.environ.get("WTRMLN_CHROMIUM_PATH")
@@ -57,23 +58,56 @@ class VirtualBrowser:
             launch_kwargs["executable_path"] = exe
         context_kwargs = {"viewport": VIEWPORT}
         # Route through an outbound proxy when the environment mandates one
-        # (e.g. sandboxed runners). The proxy re-signs TLS with its own CA,
-        # which Chromium doesn't trust, so accept its certs in that case.
+        # (e.g. sandboxed runners). TLS verification stays ON: the proxy's CA
+        # must be installed in the system/NSS trust store. Only an explicit
+        # opt-in (dev sandboxes without CA setup) relaxes it.
         proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
         if proxy:
             launch_kwargs["proxy"] = {"server": proxy}
-            context_kwargs["ignore_https_errors"] = True
             # Some TLS-inspecting egress proxies reset Chromium's TLS 1.3
             # ClientHello; the proxy re-terminates TLS anyway, so cap at 1.2.
             launch_kwargs["args"] = ["--ssl-version-max=tls1.2"]
+            if os.environ.get("WTRMLN_PROXY_INSECURE_TLS") == "1":
+                context_kwargs["ignore_https_errors"] = True
         self._browser = await self._pw.chromium.launch(**launch_kwargs)
         context = await self._browser.new_context(**context_kwargs)
+        if allowed_domains:
+            await self._install_navigation_allowlist(context, allowed_domains)
         self.page = await context.new_page()
         if start_url != "about:blank":
             try:
                 await self.page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
                 pass  # agent sees the blank/error page and navigates itself
+
+    async def _install_navigation_allowlist(self, context, allowed_domains: list[str]):
+        """Block top-level navigations outside the playbook's domains.
+
+        Subresources (CDNs, analytics) are left alone — blocking them breaks
+        login pages. The goal is that neither the model nor an injected
+        provider page can steer the top-level browsing context to an
+        arbitrary site.
+        """
+        allowed = [d.lower().lstrip(".") for d in allowed_domains]
+
+        def host_allowed(host: str) -> bool:
+            host = host.lower()
+            return any(host == d or host.endswith("." + d) for d in allowed)
+
+        async def gate(route):
+            req = route.request
+            if (req.is_navigation_request() and req.frame.parent_frame is None):
+                from urllib.parse import urlparse
+                host = urlparse(req.url).hostname or ""
+                if req.url != "about:blank" and not host_allowed(host):
+                    self.last_blocked_navigation = req.url
+                    await route.abort("blockedbyclient")
+                    return
+            await route.continue_()
+
+        self.last_blocked_navigation: str | None = None
+        # register on context so it applies to every page
+        await context.route("**/*", gate)
 
     async def stop(self):
         try:

@@ -3,6 +3,7 @@ name: Xero
 slug: xero
 icon: 📘
 color: #13B5EA
+allowed_domains: xero.com, login.xero.com
 login_url: https://login.xero.com/identity/user/login
 description: Accounting — GL, P&L, balance sheet, invoices, bank transactions
 ---
