@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'">
 <title>wtrmln — Data Platform</title>
 <style>
   :root {
@@ -29,13 +31,14 @@
   .card .icon { font-size: 22px; }
   .card .name { font-weight: 600; }
   .card .desc { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .card .spacer { flex: 1; }
   button { background: var(--accent); color: white; border: 0; border-radius: 7px;
            padding: 7px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; }
   button.secondary { background: var(--panel2); color: var(--text);
                      border: 1px solid var(--line); }
   button:disabled { opacity: .45; cursor: default; }
   .conn { font-size: 13px; }
-  .conn .status { font-weight: 600; }
+  .status { font-weight: 600; }
   .status.connected { color: var(--green); }
   .status.failed, .status.blocked, .status.aborted { color: var(--accent); }
   .status.agent_working, .status.starting { color: var(--amber); }
@@ -48,12 +51,11 @@
   #stagebody { display: grid; grid-template-columns: 1fr 360px; flex: 1; min-height: 0; }
   #screenwrap { padding: 18px; overflow: auto; }
   #screen { width: 100%; max-width: 1280px; border: 1px solid var(--line);
-            border-radius: 8px; display: block; background: #000; }
+            border-radius: 8px; display: none; background: #000; }
   #screen.interactive { cursor: crosshair; box-shadow: 0 0 0 2px #6fb1ff; }
   #feed { border-left: 1px solid var(--line); overflow-y: auto; padding: 16px;
           font-size: 13.5px; }
-  .ev { margin-bottom: 10px; }
-  .ev .t { color: var(--muted); font-size: 11px; }
+  .ev { margin-bottom: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .ev.agent { background: var(--panel); border: 1px solid var(--line);
               border-radius: 8px; padding: 8px 10px; }
   .ev.action { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; }
@@ -84,158 +86,24 @@
   <div id="stage">
     <div id="banner">
       <span id="bannertext"></span>
-      <button onclick="resumeSession()">I've logged in — continue</button>
-      <button class="secondary" onclick="abortSession()">Cancel</button>
+      <button id="resumebtn">I've logged in — continue</button>
+      <button id="abortbtn" class="secondary">Cancel</button>
     </div>
     <div id="stagebody">
       <div id="screenwrap">
         <div id="placeholder">Pick a source on the left. The agent opens a secure
           browser, you log in once, and it configures everything for you —
           watch it work here.</div>
-        <img id="screen" style="display:none" alt="agent browser">
+        <img id="screen" alt="agent browser" width="1280" height="800">
       </div>
       <div id="feed"></div>
     </div>
     <div id="typebar">
       <input id="typeinput" placeholder="Type here — sent straight to the browser (never to the AI). Enter submits.">
-      <button class="secondary" onclick="sendKey('Tab')">Tab</button>
+      <button id="tabbtn" class="secondary">Tab</button>
     </div>
   </div>
 </main>
-<script>
-let currentSession = null;
-let awaiting = false;
-let evtSource = null;
-
-async function loadConnectors() {
-  const list = await (await fetch('/api/connectors')).json();
-  const el = document.getElementById('connectors');
-  el.innerHTML = '';
-  for (const c of list) {
-    const d = document.createElement('div');
-    d.className = 'card';
-    d.innerHTML = `<div class="row"><span class="icon">${c.icon || '🔌'}</span>
-      <span class="name">${c.name}</span>
-      <span style="flex:1"></span>
-      <button onclick="connect('${c.slug}')">Connect</button></div>
-      <div class="desc">${c.description || ''}</div>`;
-    el.appendChild(d);
-  }
-}
-
-async function loadConnections() {
-  const list = await (await fetch('/api/connections')).json();
-  const el = document.getElementById('connections');
-  el.innerHTML = list.length ? '' : '<div class="conn" style="color:var(--muted)">None yet.</div>';
-  for (const c of list) {
-    const d = document.createElement('div');
-    d.className = 'card conn';
-    d.innerHTML = `<b>${c.connector}</b> — <span class="status ${c.status}">${c.status.replace('_',' ')}</span>
-      ${c.summary ? `<div class="desc">${c.summary}</div>` : ''}
-      ${c.session_id ? `<div style="margin-top:6px"><button class="secondary" onclick="watch('${c.session_id}')">Watch</button></div>` : ''}`;
-    el.appendChild(d);
-  }
-}
-
-async function connect(slug) {
-  const r = await (await fetch('/api/connections', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({connector: slug})})).json();
-  watch(r.session_id);
-  loadConnections();
-}
-
-function watch(sessionId) {
-  currentSession = sessionId;
-  document.getElementById('feed').innerHTML = '';
-  document.getElementById('placeholder').style.display = 'none';
-  document.getElementById('screen').style.display = 'block';
-  if (evtSource) evtSource.close();
-  evtSource = new EventSource(`/api/sessions/${sessionId}/events`);
-  evtSource.onmessage = (m) => handleEvent(JSON.parse(m.data));
-}
-
-function feed(html, cls) {
-  const d = document.createElement('div');
-  d.className = 'ev ' + (cls || '');
-  d.innerHTML = html;
-  const f = document.getElementById('feed');
-  f.appendChild(d);
-  f.scrollTop = f.scrollHeight;
-}
-
-function handleEvent(e) {
-  if (e.type === 'screen') refreshScreen();
-  else if (e.type === 'agent_message') feed(e.text, 'agent');
-  else if (e.type === 'log') feed(e.text);
-  else if (e.type === 'action') feed(`▸ ${e.action} ${JSON.stringify(e.detail || {})}`, 'action');
-  else if (e.type === 'credential_saved') feed(`🔐 Saved <b>${e.name}</b> to encrypted vault`, 'cred');
-  else if (e.type === 'status') {
-    setAwaiting(e.status === 'awaiting_user', e.reason);
-    feed(`<b>Status:</b> <span class="status ${e.status}">${e.status.replace('_',' ')}</span>` +
-         (e.summary ? `<div>${e.summary}</div>` : ''));
-    loadConnections();
-  }
-}
-
-function setAwaiting(on, reason) {
-  awaiting = on;
-  document.getElementById('banner').className = on ? 'show' : '';
-  document.getElementById('typebar').className = on ? 'show' : '';
-  document.getElementById('screen').className = on ? 'interactive' : '';
-  if (on) document.getElementById('bannertext').textContent =
-    '🔒 ' + (reason || 'Please log in.') + ' Your input goes directly to the site — the AI never sees it.';
-}
-
-async function refreshScreen() {
-  if (!currentSession) return;
-  const img = document.getElementById('screen');
-  img.src = `/api/sessions/${currentSession}/screen?ts=${Date.now()}`;
-}
-
-document.getElementById('screen').addEventListener('click', async (ev) => {
-  if (!awaiting || !currentSession) return;
-  const img = ev.target;
-  const rect = img.getBoundingClientRect();
-  const x = (ev.clientX - rect.left) * (1280 / rect.width);
-  const y = (ev.clientY - rect.top) * (800 / rect.height);
-  await fetch(`/api/sessions/${currentSession}/input`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({kind: 'click', x, y})});
-});
-
-document.getElementById('typeinput').addEventListener('keydown', async (ev) => {
-  if (!awaiting || !currentSession) return;
-  if (ev.key === 'Enter') {
-    const val = ev.target.value;
-    ev.target.value = '';
-    if (val) await fetch(`/api/sessions/${currentSession}/input`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({kind: 'type', text: val})});
-    await sendKey('Return');
-  }
-});
-
-async function sendKey(key) {
-  if (!currentSession) return;
-  await fetch(`/api/sessions/${currentSession}/input`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({kind: 'key', text: key})});
-}
-
-async function resumeSession() {
-  if (!currentSession) return;
-  await fetch(`/api/sessions/${currentSession}/resume`, {method: 'POST'});
-}
-
-async function abortSession() {
-  if (!currentSession) return;
-  await fetch(`/api/sessions/${currentSession}/abort`, {method: 'POST'});
-}
-
-loadConnectors();
-loadConnections();
-setInterval(loadConnections, 5000);
-</script>
+<script src="/static/app.js"></script>
 </body>
 </html>

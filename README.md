@@ -28,13 +28,17 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 pip install -r requirements.txt
 playwright install chromium   # skip if Chromium is already available
 
-# Demo mode — full flow, no API key:
-WTRMLN_MOCK_AGENT=1 uvicorn wtrmln.server:app --port 8000
+# Demo mode — full flow, no API key (dev mode: auth + vault checks relaxed):
+WTRMLN_DEV_MODE=1 WTRMLN_MOCK_AGENT=1 uvicorn wtrmln.server:app --port 8000
 
-# Real agent:
+# Real agent, locally:
 export ANTHROPIC_API_KEY=sk-ant-...
-uvicorn wtrmln.server:app --port 8000
+WTRMLN_DEV_MODE=1 uvicorn wtrmln.server:app --port 8000
 ```
+
+Outside dev mode the server **fails closed**: it refuses to start unless
+`WTRMLN_BASIC_AUTH` and `WTRMLN_VAULT_KEY` are set (see `.env.example` and
+`SECURITY.md`).
 
 Open http://localhost:8000, click **Connect** on a source, log in when the
 banner asks you to, and watch the agent finish the setup.

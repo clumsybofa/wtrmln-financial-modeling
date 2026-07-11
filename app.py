@@ -3,11 +3,21 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
 import io
-from scipy.optimize import fsolve
 import warnings
 import base64
+
+from wtrmln.finance import (
+    create_cash_flow_schedule,
+    calculate_xnpv,
+    calculate_xirr,
+    monte_carlo_simulation,
+    payback_months as find_payback_months,
+    summarize_project,
+)
+
 warnings.filterwarnings('ignore')
 
 # Helper function to convert image to base64 for HTML embedding
@@ -127,125 +137,11 @@ discount_rate = st.sidebar.slider("Discount Rate (%)", 5, 25, 12, 1) / 100
 monte_carlo_runs = st.sidebar.selectbox("Monte Carlo Simulations", [1000, 5000, 10000], index=1)
 sensitivity_analysis = st.sidebar.checkbox("Enable Sensitivity Analysis", True)
 
-# Helper functions
-def create_cash_flow_schedule(start_date, duration_years, revenue_delay_months, 
-                            initial_capex, monthly_rev, monthly_opex, staging):
-    """Create detailed cash flow schedule with dates"""
-    
-    cash_flows = []
-    dates = []
-    
-    # Create monthly dates
-    for month in range(duration_years * 12):
-        date = start_date + timedelta(days=30 * month)
-        dates.append(date)
-    
-    # Add CapEx based on staging
-    if staging == "Upfront (100% at start)":
-        cash_flows.append(-initial_capex * 1_000_000)  # Convert to dollars
-        for i in range(1, len(dates)):
-            cash_flows.append(0)  # No more CapEx
-    elif staging == "Staged (50% + 50% at 6mo)":
-        cash_flows.append(-initial_capex * 500_000)  # 50% upfront
-        for i in range(1, len(dates)):
-            if i == 6:  # 6 months later
-                cash_flows.append(-initial_capex * 500_000)  # Other 50%
-            else:
-                cash_flows.append(0)
-    elif staging == "Delayed (100% at 3mo)":
-        cash_flows.append(0)  # Nothing upfront
-        for i in range(1, len(dates)):
-            if i == 3:  # 3 months later
-                cash_flows.append(-initial_capex * 1_000_000)
-            else:
-                cash_flows.append(0)
-    
-    # Add operational cash flows
-    for month in range(len(dates)):
-        if month >= revenue_delay_months:
-            # Revenue starts after delay
-            operational_cf = (monthly_rev - monthly_opex) * 1000  # Convert to dollars
-        else:
-            # Only OpEx during delay period
-            operational_cf = -monthly_opex * 1000
-        
-        cash_flows[month] += operational_cf
-    
-    return pd.DataFrame({
-        'Date': dates,
-        'CashFlow': cash_flows,
-        'CumulativeCF': np.cumsum(cash_flows)
-    })
+# Financial functions live in wtrmln/finance.py (unit-tested, UI-free).
 
-def calculate_xnpv(cash_flows, dates, discount_rate):
-    """Calculate XNPV using actual dates"""
-    start_date = dates[0]
-    xnpv = 0
-    
-    for cf, date in zip(cash_flows, dates):
-        days_diff = (date - start_date).days
-        years_diff = days_diff / 365.25
-        xnpv += cf / (1 + discount_rate) ** years_diff
-    
-    return xnpv
-
-def calculate_xirr(cash_flows, dates, guess=0.1):
-    """Calculate XIRR using Newton-Raphson method"""
-    start_date = dates[0]
-    
-    def xnpv_func(rate):
-        result = 0
-        for cf, date in zip(cash_flows, dates):
-            days_diff = (date - start_date).days
-            years_diff = days_diff / 365.25
-            result += cf / (1 + rate) ** years_diff
-        return result
-    
-    try:
-        irr = fsolve(xnpv_func, guess)[0]
-        return max(-0.99, min(5.0, irr))  # Cap between -99% and 500%
-    except:
-        return 0
-
-def monte_carlo_simulation(base_params, num_runs=5000):
-    """Run Monte Carlo simulation with parameter uncertainty"""
-    results = []
-    
-    for _ in range(num_runs):
-        # Add uncertainty to key parameters
-        capex_variation = np.random.normal(1.0, 0.15)  # ±15% uncertainty
-        revenue_variation = np.random.normal(1.0, 0.20)  # ±20% uncertainty
-        opex_variation = np.random.normal(1.0, 0.10)  # ±10% uncertainty
-        
-        # Create scenario
-        scenario_capex = base_params['capex'] * capex_variation
-        scenario_revenue = base_params['revenue'] * revenue_variation
-        scenario_opex = base_params['opex'] * opex_variation
-        
-        # Calculate cash flows for this scenario
-        cf_data = create_cash_flow_schedule(
-            base_params['start_date'],
-            base_params['duration'],
-            base_params['revenue_delay'],
-            scenario_capex,
-            scenario_revenue,
-            scenario_opex,
-            base_params['staging']
-        )
-        
-        # Calculate metrics
-        xnpv = calculate_xnpv(cf_data['CashFlow'], cf_data['Date'], base_params['discount_rate'])
-        xirr = calculate_xirr(cf_data['CashFlow'], cf_data['Date'])
-        
-        results.append({
-            'XNPV': xnpv,
-            'XIRR': xirr,
-            'CapEx_Factor': capex_variation,
-            'Revenue_Factor': revenue_variation,
-            'OpEx_Factor': opex_variation
-        })
-    
-    return pd.DataFrame(results)
+if capex_staging == "Custom Staging":
+    st.sidebar.caption("Custom staging schedules aren't configurable yet — "
+                       "this option currently behaves as 100% upfront.")
 
 # Main calculation
 base_params = {
@@ -267,17 +163,15 @@ cf_df = create_cash_flow_schedule(
 
 # Calculate base metrics
 base_xnpv = calculate_xnpv(cf_df['CashFlow'], cf_df['Date'], discount_rate)
-base_xirr = calculate_xirr(cf_df['CashFlow'], cf_df['Date'])
+base_xirr = calculate_xirr(cf_df['CashFlow'], cf_df['Date'])  # None if undefined
 
-# Payback calculation
-cumulative_cf = cf_df['CumulativeCF'].values
-payback_months = None
-for i, cum_cf in enumerate(cumulative_cf):
-    if cum_cf > 0:
-        payback_months = i
-        break
+project_summary = summarize_project(
+    cf_df, initial_capex, monthly_revenue, monthly_opex,
+    project_duration, revenue_delay,
+)
 
-payback_years = payback_months / 12 if payback_months else project_duration
+payback_month_n = find_payback_months(cf_df['CumulativeCF'].values)
+payback_years = payback_month_n / 12 if payback_month_n is not None else None
 
 # Main dashboard
 col1, col2, col3, col4 = st.columns(4)
@@ -290,29 +184,25 @@ with col1:
     )
 
 with col2:
-    xirr_display = base_xirr * 100 if base_xirr > -0.99 else -99
-    risk_class = "risk-low" if xirr_display > 20 else "risk-medium" if xirr_display > 10 else "risk-high"
     st.metric(
         "XIRR (Date-based IRR)",
-        f"{xirr_display:.1f}%",
-        delta="vs. Required Return"
+        f"{base_xirr * 100:.1f}%" if base_xirr is not None else "n/a",
+        delta="vs. Required Return" if base_xirr is not None else "No IRR (check cash flow signs)"
     )
 
 with col3:
     st.metric(
         "Payback Period",
-        f"{payback_years:.1f} years",
-        delta=f"{payback_months} months" if payback_months else "No payback"
+        f"{payback_years:.1f} years" if payback_years is not None else "No payback",
+        delta=f"{payback_month_n} months" if payback_month_n is not None else None
     )
 
 with col4:
-    total_investment = initial_capex * 1_000_000
-    total_return = base_xnpv + total_investment
-    roi_percent = (total_return / total_investment - 1) * 100 if total_investment > 0 else 0
+    roi_percent = project_summary["roi"] * 100 if project_summary["roi"] is not None else None
     st.metric(
-        "Total ROI",
-        f"{roi_percent:.1f}%",
-        delta=f"${total_return/1_000_000:.1f}M return"
+        "Undiscounted ROI",
+        f"{roi_percent:.1f}%" if roi_percent is not None else "n/a",
+        delta=f"${project_summary['net_cash_flow']/1_000_000:.1f}M net cash flow"
     )
 
 # Tabs for different analyses
@@ -362,18 +252,18 @@ with tab1:
         st.subheader("Project Summary")
         summary_data = {
             "Metric": [
-                "Total Investment",
-                "Total Revenue",
+                "Total Investment (CapEx)",
+                "Gross Revenue",
                 "Total OpEx",
                 "Net Cash Flow",
                 "Revenue Delay",
                 "Investment Period"
             ],
             "Value": [
-                f"${initial_capex:.1f}M",
-                f"${cf_df['CashFlow'][cf_df['CashFlow'] > 0].sum()/1_000_000:.1f}M",
-                f"${abs(cf_df['CashFlow'][cf_df['CashFlow'] < 0].sum())/1_000_000:.1f}M",
-                f"${cf_df['CashFlow'].sum()/1_000_000:.1f}M",
+                f"${project_summary['total_capex']/1_000_000:.1f}M",
+                f"${project_summary['gross_revenue']/1_000_000:.1f}M",
+                f"${project_summary['total_opex']/1_000_000:.1f}M",
+                f"${project_summary['net_cash_flow']/1_000_000:.1f}M",
                 f"{revenue_delay} months",
                 f"{project_duration} years"
             ]
@@ -382,9 +272,9 @@ with tab1:
     
     with col2:
         st.subheader("Key Dates")
-        revenue_start_date = start_date + timedelta(days=30 * revenue_delay)
-        project_end_date = start_date + timedelta(days=365 * project_duration)
-        
+        revenue_start_date = start_date + relativedelta(months=revenue_delay)
+        project_end_date = start_date + relativedelta(years=project_duration)
+
         date_data = {
             "Event": [
                 "Project Start",
@@ -395,7 +285,8 @@ with tab1:
             "Date": [
                 start_date.strftime("%b %Y"),
                 revenue_start_date.strftime("%b %Y"),
-                (start_date + timedelta(days=30 * payback_months)).strftime("%b %Y") if payback_months else "Never",
+                (start_date + relativedelta(months=payback_month_n)).strftime("%b %Y")
+                if payback_month_n is not None else "Never",
                 project_end_date.strftime("%b %Y")
             ]
         }
@@ -413,26 +304,31 @@ with tab2:
         with col1:
             # XNPV distribution
             fig_npv = px.histogram(
-                mc_results, 
+                mc_results,
                 x='XNPV',
                 title='XNPV Distribution',
                 color_discrete_sequence=['#ff4757']
             )
             fig_npv.add_vline(x=base_xnpv, line_dash="dash", line_color="black", annotation_text="Base Case")
-            fig_npv.update_xaxis(title="XNPV ($)")
+            fig_npv.update_xaxes(title="XNPV ($)")
             st.plotly_chart(fig_npv, use_container_width=True)
-        
+
         with col2:
-            # XIRR distribution
+            # XIRR distribution — scenarios with no defined IRR are excluded
+            xirr_results = mc_results.dropna(subset=['XIRR'])
             fig_irr = px.histogram(
-                mc_results, 
+                xirr_results,
                 x='XIRR',
                 title='XIRR Distribution',
                 color_discrete_sequence=['#2c3e50']
             )
-            fig_irr.add_vline(x=base_xirr, line_dash="dash", line_color="black", annotation_text="Base Case")
-            fig_irr.update_xaxis(title="XIRR (%)")
+            if base_xirr is not None:
+                fig_irr.add_vline(x=base_xirr, line_dash="dash", line_color="black", annotation_text="Base Case")
+            fig_irr.update_xaxes(title="XIRR (%)")
             st.plotly_chart(fig_irr, use_container_width=True)
+            n_undefined = len(mc_results) - len(xirr_results)
+            if n_undefined:
+                st.caption(f"{n_undefined:,} scenario(s) had no defined IRR and are excluded.")
         
         # Risk metrics
         st.subheader("Risk Metrics")
@@ -543,12 +439,12 @@ with tab4:
         
         # Add summary metrics
         summary_df = pd.DataFrame({
-            'Metric': ['XNPV ($M)', 'XIRR (%)', 'Payback (Years)', 'Total ROI (%)'],
+            'Metric': ['XNPV ($M)', 'XIRR (%)', 'Payback (Years)', 'Undiscounted ROI (%)'],
             'Value': [
                 round(base_xnpv/1_000_000, 2),
-                round(base_xirr*100, 1),
-                round(payback_years, 1),
-                round(roi_percent, 1)
+                round(base_xirr*100, 1) if base_xirr is not None else "n/a",
+                round(payback_years, 1) if payback_years is not None else "n/a",
+                round(roi_percent, 1) if roi_percent is not None else "n/a"
             ]
         })
         

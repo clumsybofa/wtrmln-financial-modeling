@@ -5,6 +5,7 @@ numpy
 plotly
 scipy
 xlsxwriter
+python-dateutil
 
 # Agent-first data platform
 anthropic

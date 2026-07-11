@@ -3,6 +3,7 @@ name: Salesforce
 slug: salesforce
 icon: ☁️
 color: #00A1E0
+allowed_domains: salesforce.com, force.com, salesforce-setup.com, my.salesforce.com
 login_url: https://login.salesforce.com
 description: CRM — pipeline, opportunities, accounts, closed-won bookings
 ---

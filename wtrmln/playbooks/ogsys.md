@@ -3,6 +3,7 @@ name: OGsys
 slug: ogsys
 icon: 🛢️
 color: #1B3A5C
+allowed_domains: ogsys.com, quorumsoftware.com
 login_url: https://ondemand.ogsys.com/sign_in
 description: Oil & gas accounting (Quorum On Demand) — GL, JIB, revenue distribution, AFE, severance tax
 ---

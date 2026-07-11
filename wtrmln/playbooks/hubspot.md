@@ -3,6 +3,7 @@ name: HubSpot
 slug: hubspot
 icon: 🧡
 color: #FF7A59
+allowed_domains: hubspot.com, hubapi.com
 login_url: https://app.hubspot.com/login
 description: CRM — deals, pipeline, companies, contacts
 ---

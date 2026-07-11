@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +27,12 @@ from .browser import VIEWPORT, VirtualBrowser
 MODEL = os.environ.get("WTRMLN_AGENT_MODEL", "claude-opus-4-8")
 COMPUTER_USE_BETA = "computer-use-2025-11-24"
 MAX_ITERATIONS = 80
+SESSION_TIMEOUT = int(os.environ.get("WTRMLN_SESSION_TIMEOUT", "1800"))  # seconds
+MAX_EVENTS = 2000  # per-session in-memory event cap
+CREDENTIAL_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+MAX_CREDENTIAL_VALUE_LEN = 4096
+
+TERMINAL_STATUSES = ("connected", "blocked", "failed", "aborted")
 
 PLAYBOOK_DIR = Path(__file__).resolve().parent / "playbooks"
 
@@ -83,6 +90,9 @@ class ConnectionSession:
 
     def __init__(self, connector: str, playbook: dict):
         self.id = uuid.uuid4().hex[:12]
+        # Bearer token required by every session API endpoint; issued once
+        # to the creator and never persisted or listed.
+        self.token = secrets.token_urlsafe(24)
         self.connector = connector
         self.playbook = playbook
         self.connection_id = db.create_connection(connector)
@@ -94,6 +104,7 @@ class ConnectionSession:
         self._abort = False
         self.latest_screenshot_b64: str | None = None
         self._seq = 0
+        self.finished_at: float = 0.0
 
     # --- event plumbing (SSE) ------------------------------------------------
 
@@ -101,6 +112,8 @@ class ConnectionSession:
         event = {"seq": self._seq, "type": type_, "ts": time.time(), **data}
         self._seq += 1
         self.events.append(event)
+        if len(self.events) > MAX_EVENTS:  # cap in-memory log; DB keeps history
+            del self.events[: len(self.events) - MAX_EVENTS]
         db.log_event(self.id, event["seq"], type_, data)
         for q in list(self._subscribers):
             q.put_nowait(event)
@@ -118,6 +131,8 @@ class ConnectionSession:
 
     def set_status(self, status: str, **extra):
         self.status = status
+        if status in TERMINAL_STATUSES:
+            self.finished_at = time.time()
         db.update_connection(self.connection_id, status, extra.get("summary"),
                              extra.get("sync_config"))
         self.emit("status", status=status, **extra)
@@ -129,27 +144,40 @@ class ConnectionSession:
         self._abort = True
         self._resume_event.set()  # unblock a parked handoff
 
-    async def _refresh_screen(self):
+    async def refresh_screen(self):
         try:
             self.latest_screenshot_b64 = await self.browser.screenshot_b64()
             self.emit("screen")  # UI re-fetches /screen on this signal
         except Exception:
             pass
 
+    # kept for backward compatibility with internal callers
+    _refresh_screen = refresh_screen
+
     # --- the agent loop -------------------------------------------------------
 
     async def run(self):
         try:
-            await self.browser.start(self.playbook.get("login_url", "about:blank"))
-            await self._refresh_screen()
-            if os.environ.get("WTRMLN_MOCK_AGENT") == "1":
-                await self._run_mock()
-            else:
-                await self._run_agent()
+            await asyncio.wait_for(self._run_inner(), timeout=SESSION_TIMEOUT)
+        except asyncio.TimeoutError:
+            self.set_status("failed",
+                            summary=f"Session exceeded the {SESSION_TIMEOUT // 60}-minute "
+                                    "limit and was stopped.")
         except Exception as e:
             self.set_status("failed", summary=f"Unexpected error: {e}")
         finally:
             await self.browser.stop()
+
+    async def _run_inner(self):
+        allowed = [d.strip() for d in self.playbook.get("allowed_domains", "").split(",")
+                   if d.strip()]
+        await self.browser.start(self.playbook.get("login_url", "about:blank"),
+                                 allowed_domains=allowed or None)
+        await self.refresh_screen()
+        if os.environ.get("WTRMLN_MOCK_AGENT") == "1":
+            await self._run_mock()
+        else:
+            await self._run_agent()
 
     def _tools(self):
         return [
@@ -179,16 +207,23 @@ class ConnectionSession:
                 "strict": True,
             },
             {
+                # Trust boundary, stated explicitly: secrets the agent
+                # provisions in the provider's UI DO pass through the model
+                # (it reads them from the screen and echoes them into this
+                # tool call). That is inherent to agent-provisioned setup.
+                # User-entered login credentials never do — the model is
+                # parked and receives no screenshots during the handoff.
                 "name": "save_credential",
                 "description": (
                     "Persist a secret you provisioned in the provider's UI "
                     "(API key, OAuth client id/secret, export URL) into "
-                    "wtrmln's encrypted vault."
+                    "wtrmln's encrypted vault. Names must be lowercase "
+                    "snake_case, max 64 chars."
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Identifier, e.g. 'xero_client_secret'"},
+                        "name": {"type": "string", "description": "Identifier matching ^[a-z0-9_]{1,64}$, e.g. 'xero_client_secret'"},
                         "value": {"type": "string"},
                     },
                     "required": ["name", "value"],
@@ -198,11 +233,16 @@ class ConnectionSession:
             },
             {
                 "name": "mark_connected",
-                "description": "Declare the integration verified and finished.",
+                "description": (
+                    "Declare the integration finished. Only call this after "
+                    "completing the playbook's verification steps; describe "
+                    "the concrete evidence you observed."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "summary": {"type": "string", "description": "Plain-language summary for the customer."},
+                        "verification": {"type": "string", "description": "Concrete evidence observed on screen that the playbook's verification steps passed (what you saw, where)."},
                         "sync_config": {
                             "type": "object",
                             "properties": {
@@ -214,7 +254,7 @@ class ConnectionSession:
                             "additionalProperties": False,
                         },
                     },
-                    "required": ["summary", "sync_config"],
+                    "required": ["summary", "verification", "sync_config"],
                     "additionalProperties": False,
                 },
                 "strict": True,
@@ -333,13 +373,28 @@ class ConnectionSession:
                     "to verify you are signed in before proceeding."), False
 
         if name == "save_credential":
-            vault.store_credential(self.connection_id, tool_input["name"], tool_input["value"])
-            self.emit("credential_saved", name=tool_input["name"])  # value never emitted
-            return f"Stored '{tool_input['name']}' in the encrypted vault.", False
+            cred_name = tool_input.get("name", "")
+            cred_value = tool_input.get("value", "")
+            if not CREDENTIAL_NAME_RE.match(cred_name):
+                return ("Rejected: credential name must match ^[a-z0-9_]{1,64}$. "
+                        "Retry with a valid name."), False
+            if not 0 < len(cred_value) <= MAX_CREDENTIAL_VALUE_LEN:
+                return (f"Rejected: credential value must be 1-"
+                        f"{MAX_CREDENTIAL_VALUE_LEN} characters."), False
+            vault.store_credential(self.connection_id, cred_name, cred_value)
+            self.emit("credential_saved", name=cred_name)  # value never emitted
+            return f"Stored '{cred_name}' in the encrypted vault.", False
 
         if name == "mark_connected":
+            sync_config = dict(tool_input.get("sync_config") or {})
+            # Verification here is the agent's observed evidence, recorded for
+            # audit. Programmatic provider-side validation (a real API call
+            # with the vaulted credential) lands with the sync engine and is
+            # tracked as verified_by_sync.
+            sync_config["verification_evidence"] = tool_input.get("verification", "")
+            sync_config["verified_by_sync"] = False
             self.set_status("connected", summary=tool_input.get("summary"),
-                            sync_config=tool_input.get("sync_config"))
+                            sync_config=sync_config)
             return "Connection recorded. You are done.", True
 
         if name == "report_blocked":
@@ -374,5 +429,6 @@ class ConnectionSession:
         await self._handle_tool("mark_connected", {
             "summary": f"{name} is connected (demo mode). In a real run I would have "
                        "provisioned API access and verified a data pull.",
+            "verification": "Demo mode — no real verification performed.",
             "sync_config": {"datasets": ["demo"], "method": "mock", "frequency": "daily"},
         })
