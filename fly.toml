@@ -1,0 +1,33 @@
+# Fly.io deployment for the wtrmln data platform (v0).
+#
+#   fly launch --copy-config --no-deploy    # first time; pick a region
+#   fly volumes create wtrmln_data --size 1
+#   fly secrets set ANTHROPIC_API_KEY=sk-ant-... WTRMLN_BASIC_AUTH=team:strongpassword
+#   fly deploy
+#
+# Browsers run in-process, so give the machine enough memory for a few
+# concurrent onboarding sessions (each Chromium is ~300-500 MB).
+
+app = "wtrmln"
+primary_region = "dfw"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  WTRMLN_AGENT_MODEL = "claude-opus-4-8"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[mounts]]
+  source = "wtrmln_data"
+  destination = "/app/data"
+
+[[vm]]
+  size = "shared-cpu-4x"
+  memory = "4gb"

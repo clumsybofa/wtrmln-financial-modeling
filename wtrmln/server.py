@@ -7,9 +7,11 @@ Run: uvicorn wtrmln.server:app --host 0.0.0.0 --port 8000
 import asyncio
 import base64
 import json
+import os
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -18,6 +20,26 @@ from .agent import ConnectionSession, load_playbooks
 from .browser import VIEWPORT
 
 app = FastAPI(title="wtrmln data platform")
+
+
+# v0 access control for hosted deployments: set WTRMLN_BASIC_AUTH="user:pass"
+# and every request must carry matching HTTP Basic credentials. Unset = open
+# (local development). Replaced by real multi-tenant auth in v1.
+@app.middleware("http")
+async def basic_auth(request: Request, call_next):
+    expected = os.environ.get("WTRMLN_BASIC_AUTH")
+    if expected:
+        header = request.headers.get("authorization", "")
+        supplied = ""
+        if header.startswith("Basic "):
+            try:
+                supplied = base64.b64decode(header[6:]).decode()
+            except Exception:
+                supplied = ""
+        if not secrets.compare_digest(supplied, expected):
+            return Response(status_code=401, content="Authentication required",
+                            headers={"WWW-Authenticate": 'Basic realm="wtrmln"'})
+    return await call_next(request)
 
 SESSIONS: dict[str, ConnectionSession] = {}
 STATIC_DIR = Path(__file__).resolve().parent / "static"

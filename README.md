@@ -41,6 +41,33 @@ banner asks you to, and watch the agent finish the setup.
 
 The modeling app still runs separately: `streamlit run app.py`.
 
+## Deploying to the web (v0)
+
+The whole platform is one long-running process (FastAPI + in-process
+Chromium), so it deploys as a single Docker image. Serverless hosts
+(Vercel/Netlify functions) won't work — the browser and SSE streams need a
+persistent machine.
+
+**Fly.io** (config included):
+
+```bash
+fly launch --copy-config --no-deploy
+fly volumes create wtrmln_data --size 1
+fly secrets set ANTHROPIC_API_KEY=sk-ant-... WTRMLN_BASIC_AUTH=team:strongpassword
+fly deploy
+```
+
+**Railway / Render / any Docker host:** point it at the `Dockerfile`, expose
+port 8080, mount a volume at `/app/data`, and set the same two environment
+variables.
+
+`WTRMLN_BASIC_AUTH=user:pass` puts HTTP Basic auth in front of everything —
+required for anything internet-facing, since sessions display customer
+data. Size the machine ~4 GB RAM: each concurrent onboarding session runs
+its own Chromium (~300–500 MB). Real multi-tenant auth, per-tenant vaults,
+and a remote browser pool are the v1/v2 steps (see
+`docs/ARCHITECTURE.md`).
+
 ## How the login handoff works
 
 1. The agent drives the browser to the provider's login page and calls its
