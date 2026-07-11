@@ -1,16 +1,16 @@
 ---
-name: Quorum On Demand Accounting
-slug: quorum_ogsys
+name: OGsys
+slug: ogsys
 icon: 🛢️
 color: #1B3A5C
 login_url: https://ondemand.ogsys.com/sign_in
-description: Oil & gas accounting (OGsys) — GL, JIB, revenue distribution, AFE, severance tax
+description: Oil & gas accounting (Quorum On Demand) — GL, JIB, revenue distribution, AFE, severance tax
 ---
 
 # Goal
 
-Connect the customer's Quorum On Demand Accounting (formerly OGsys) instance
-to wtrmln so upstream oil & gas accounting data — general ledger, joint
+Connect the customer's OGsys instance (now sold by Quorum as "On Demand
+Accounting") to wtrmln so upstream oil & gas accounting data — general ledger, joint
 interest billing, revenue distribution, AFE spend, AP/AR — feeds wtrmln's
 partnership and project models.
 
